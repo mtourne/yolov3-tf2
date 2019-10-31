@@ -1,3 +1,7 @@
+# This Fork
+
+WIP for working on TACO trash dataset, see train_taco.py
+
 # YoloV3 Implemented in TensorFlow 2.0
 
 This repo provides a clean implementation of YoloV3 in TensorFlow 2.0 using all the best practices.
