@@ -11,6 +11,7 @@ from yolov3_tf2.utils import draw_outputs
 
 
 flags.DEFINE_string('classes', './data/coco.names', 'path to classes file')
+flags.DEFINE_integer('classes_count', -1, 'class size if -1 read dataset_class, for fine tune needs to be 80!')
 flags.DEFINE_string('weights', './checkpoints/yolov3.tf',
                     'path to weights file')
 flags.DEFINE_boolean('tiny', False, 'yolov3 or yolov3-tiny')
@@ -20,16 +21,19 @@ flags.DEFINE_string('video', './data/video.mp4',
 
 
 def main(_argv):
+    class_names = [c.strip() for c in open(FLAGS.classes).readlines()]
+    classes_count = len(class_names)
+    if FLAGS.classes_count != -1:
+        classes_count = FLAGS.classes_count
+    logging.info('{} classes loaded'.format(classes_count))
+
     if FLAGS.tiny:
-        yolo = YoloV3Tiny()
+        yolo = YoloV3Tiny(classes=classes_count)
     else:
-        yolo = YoloV3()
+        yolo = YoloV3(classes=classes_count)
 
     yolo.load_weights(FLAGS.weights)
     logging.info('weights loaded')
-
-    class_names = [c.strip() for c in open(FLAGS.classes).readlines()]
-    logging.info('classes loaded')
 
     times = []
 

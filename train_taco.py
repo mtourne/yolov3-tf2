@@ -13,15 +13,12 @@ from matplotlib.patches import Rectangle
 from imgaug import augmenters as iaa
 
 import yolov3_tf2.models as yolo_model
-
-## TODO turn TACO/detector into a module
-TACO_DETECTOR_PATH = '/opt/data/TACO/detector'
-sys.path.append(TACO_DETECTOR_PATH)
+import yolov3_tf2.dataset as yolo_dataset
 
 # TACO IMPORTS
-from dataset import Taco
-import utils as taco_utils
-import model2
+from TACO.detector.dataset import Taco
+import TACO.detector.utils as taco_utils
+from TACO.detector import model2
 
 IMG_SIZE = 416
 
@@ -80,7 +77,7 @@ class Config(object):
     MEAN_PIXEL = np.array([123.7, 116.8, 103.9])
 
     # Maximum number of ground truth instances to use in one image
-    MAX_GT_INSTANCES = 100
+    MAX_GT_INSTANCES = 6 
 
 ######################
 ### CONFIGURATION  ###
@@ -156,6 +153,9 @@ def data_generator(dataset, config, shuffle=True, augmentation=None,
                     (batch_size, config.MAX_GT_INSTANCES), dtype=np.int32)
                 batch_gt_boxes = np.zeros(
                     (batch_size, config.MAX_GT_INSTANCES, 4), dtype=np.float32)
+                
+                batch_bboxes_labels = np.zeros(
+                    (batch_size, config.MAX_GT_INSTANCES, 5), dtype=np.float32)
                 ## Don't return the masks to save some memory.
 
             # If more instances than fits in the array, sub-sample from them.
@@ -163,24 +163,37 @@ def data_generator(dataset, config, shuffle=True, augmentation=None,
                 ids = np.random.choice(
                     np.arange(gt_boxes.shape[0]), config.MAX_GT_INSTANCES, replace=False)
                 gt_class_ids = gt_class_ids[ids]
-                gt_boxes = gt_boxes[ids]
+                gt_boxes_labels = gt_boxes[ids]
                 gt_masks = gt_masks[:, :, ids]
 
             # Add to batch
-            
+
             batch_image_meta[b] = image_meta
             image = model2.mold_image(image.astype(np.float32), config)
             batch_images[b] = image
             batch_gt_class_ids[b, :gt_class_ids.shape[0]] = gt_class_ids
 
+            ## wasTODO
+            # swap rows around to get expected xmin, ymin, xmax, ymax
+            # order expected by yolo.
+            # coming from load image_gt they are in the order y1, x1, y2, x2
+            # XXX no need to do for now, changed extract_bboxes() to return the
+            # correct order.
             batch_gt_boxes[b, :gt_boxes.shape[0]] = gt_boxes
 
+            batch_bboxes_labels[b, :gt_boxes.shape[0], :gt_boxes.shape[1]] = gt_boxes
+            batch_bboxes_labels[b, :gt_class_ids.shape[0], 4] = gt_class_ids.transpose()
             b += 1
 
             # Batch full?
             if b >= batch_size:
-                inputs = [batch_images, batch_image_meta, batch_gt_class_ids, batch_gt_boxes ]
-                outputs = []
+                # XXX we're just going to return batch_images, and batch_y
+                inputs = batch_images
+                outputs = batch_bboxes_labels
+
+                # OG code, why no output?
+                #inputs = [batch_images, batch_image_meta, batch_gt_class_ids, batch_gt_boxes ]
+                #outputs = []
 
                 yield inputs, outputs
 
@@ -238,16 +251,39 @@ def main():
     # Training generator
     image_ids = np.copy(dataset_train.image_ids)
 
+    gt_boxes = []
     image_id = 0
+
+    yolo_fake_dataset = yolo_dataset.load_fake_dataset()
+    print("YOLO EXAMPLE DATASET: ", yolo_fake_dataset)
+
+    TEST_LABELS=False
+    if TEST_LABELS:
+        while True:
+            (image,
+             image_meta,
+             gt_class_ids,
+             gt_boxes,
+             gt_masks) = model2.load_image_gt(dataset_train, CONFIG, image_id,
+                                              augmentation=augmentation_pipeline)
+
+        print("gt_boxes: ", gt_boxes)
+        print("gt_class_ids: ", gt_class_ids)
+        image_id += 1
+        MAX_CLASSES = 10
+        boxes_and_labels = np.zeros((MAX_CLASSES, 5), dtype=np.float32)
+        boxes_and_labels[:gt_boxes.shape[0], :gt_boxes.shape[1]] = gt_boxes
+        boxes_and_labels[:gt_class_ids.shape[0], 4] = gt_class_ids.transpose()
+        print("boxes_and_labels: ", boxes_and_labels)
+
+
     (image,
      image_meta,
      gt_class_ids,
      gt_boxes,
      gt_masks) = model2.load_image_gt(dataset_train, CONFIG, image_id,
                                       augmentation=augmentation_pipeline)
-
     box = gt_boxes[0]
-    print(box)
     # matplotlib : show image
     fig,ax = plt.subplots(1)
     plt.axis('off')
@@ -256,7 +292,7 @@ def main():
     color = colorsys.hsv_to_rgb(np.random.random(),1,1)
     # (x1,y1) top left corner
     # (x2,y2) bottom right
-    [y1, x1, y2, x2] = box
+    [x1, y1, x2, y2] = box
     h = y2 - y1
     w = x2 - x1
     rect = Rectangle((x1,y1+h), w, -h, linewidth=2, edgecolor=color,
@@ -297,7 +333,7 @@ def main():
     model = yolo_model.YoloV3(IMG_SIZE, training=True, classes=classes_count)
     anchors = yolo_model.yolo_anchors
     anchor_masks = yolo_model.yolo_anchor_masks
-    
+
     optimizer = tf.keras.optimizers.Adam(lr=CONFIG.LEARNING_RATE)
     loss = [yolo_model.YoloLoss(anchors[mask], classes=classes_count) for mask in anchor_masks]
 

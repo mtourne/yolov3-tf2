@@ -211,6 +211,7 @@ def YoloV3(size=None, channels=3, anchors=yolo_anchors,
     output_2 = YoloOutput(128, len(masks[2]), classes, name='yolo_output_2')(x)
 
     if training:
+        # XXX need to understand this!
         return Model(inputs, (output_0, output_1, output_2), name='yolov3')
 
     boxes_0 = Lambda(lambda x: yolo_boxes(x, anchors[masks[0]], classes),

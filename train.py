@@ -3,6 +3,9 @@ from absl.flags import FLAGS
 import tensorflow as tf
 import numpy as np
 import cv2
+import sys
+import gc
+
 from tensorflow.keras.callbacks import (
     ReduceLROnPlateau,
     EarlyStopping,
@@ -14,7 +17,7 @@ from yolov3_tf2.models import (
     yolo_anchors, yolo_anchor_masks,
     yolo_tiny_anchors, yolo_tiny_anchor_masks
 )
-from yolov3_tf2.utils import freeze_all
+from yolov3_tf2.utils import freeze_all, get_classes
 import yolov3_tf2.dataset as dataset
 
 flags.DEFINE_string('dataset', '', 'path to dataset')
@@ -37,16 +40,23 @@ flags.DEFINE_enum('transfer', 'none',
 flags.DEFINE_integer('size', 416, 'image size')
 flags.DEFINE_integer('epochs', 2, 'number of epochs')
 flags.DEFINE_integer('batch_size', 8, 'batch size')
+flags.DEFINE_integer('classes_count', -1, 'class size if -1 read dataset_class, for fine tune needs to be 80!')
 flags.DEFINE_float('learning_rate', 1e-3, 'learning rate')
 
 
 def main(_argv):
+
+    classes_count = len(get_classes(FLAGS.classes))
+    if FLAGS.classes_count != -1:
+        classes_count = FLAGS.classes_count
+    print("Using {} classes".format(classes_count))
+    
     if FLAGS.tiny:
-        model = YoloV3Tiny(FLAGS.size, training=True)
+        model = YoloV3Tiny(FLAGS.size, training=True, classes=classes_count)
         anchors = yolo_tiny_anchors
         anchor_masks = yolo_tiny_anchor_masks
     else:
-        model = YoloV3(FLAGS.size, training=True)
+        model = YoloV3(FLAGS.size, training=True, classes=classes_count)
         anchors = yolo_anchors
         anchor_masks = yolo_anchor_masks
 
@@ -58,7 +68,7 @@ def main(_argv):
     train_dataset = train_dataset.batch(FLAGS.batch_size)
     train_dataset = train_dataset.map(lambda x, y: (
         dataset.transform_images(x, FLAGS.size),
-        dataset.transform_targets(y, anchors, anchor_masks, 80)))
+        dataset.transform_targets(y, anchors, anchor_masks, classes_count)))
     train_dataset = train_dataset.prefetch(
         buffer_size=tf.data.experimental.AUTOTUNE)
 
@@ -69,32 +79,39 @@ def main(_argv):
     val_dataset = val_dataset.batch(FLAGS.batch_size)
     val_dataset = val_dataset.map(lambda x, y: (
         dataset.transform_images(x, FLAGS.size),
-        dataset.transform_targets(y, anchors, anchor_masks, 80)))
+        dataset.transform_targets(y, anchors, anchor_masks, classes_count)))
 
     if FLAGS.transfer != 'none':
-        model.load_weights(FLAGS.weights)
         if FLAGS.transfer == 'fine_tune':
+        model.load_weights(FLAGS.weights)
             # freeze darknet
             darknet = model.get_layer('yolo_darknet')
             freeze_all(darknet)
         elif FLAGS.mode == 'frozen':
+            model.load_weights(FLAGS.weights)
             # freeze everything
             freeze_all(model)
         else:
             # reset top layers
             if FLAGS.tiny:  # get initial weights
-                init_model = YoloV3Tiny(FLAGS.size, training=True)
+                orig_model = YoloV3Tiny(FLAGS.size, training=True, classes=80)
             else:
-                init_model = YoloV3(FLAGS.size, training=True)
+                orig_model = YoloV3(FLAGS.size, training=True, classes=80)
 
             if FLAGS.transfer == 'darknet':
-                for l in model.layers:
-                    if l.name != 'yolo_darknet' and l.name.startswith('yolo_'):
-                        l.set_weights(init_model.get_layer(
-                            l.name).get_weights())
-                    else:
-                        freeze_all(l)
+                # transfering the yolo_darknet layer
+                # here we use or orig_model with all the classes
+                # and load up its weights 
+                model_pretrained = orig_model
+                model_pretrained.load_weights(FLAGS.weights)
+                model.get_layer('yolo_darknet').set_weights(
+                    model_pretrained.get_layer('yolo_darknet').get_weights())
+                # freeze?
+                freeze_all(model.get_layer('yolo_darknet'))
+            
             elif FLAGS.transfer == 'no_output':
+                # here init_model is entirely empty
+                init_model = orig_model
                 for l in model.layers:
                     if l.name.startswith('yolo_output'):
                         l.set_weights(init_model.get_layer(
@@ -103,7 +120,7 @@ def main(_argv):
                         freeze_all(l)
 
     optimizer = tf.keras.optimizers.Adam(lr=FLAGS.learning_rate)
-    loss = [YoloLoss(anchors[mask]) for mask in anchor_masks]
+    loss = [YoloLoss(anchors[mask], classes=classes_count) for mask in anchor_masks]
 
     if FLAGS.mode == 'eager_tf':
         # Eager mode is great for debugging

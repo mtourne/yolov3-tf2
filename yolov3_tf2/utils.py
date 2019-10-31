@@ -1,3 +1,5 @@
+import codecs
+
 from absl import logging
 import numpy as np
 import tensorflow as tf
@@ -107,8 +109,12 @@ def draw_outputs(img, outputs, class_names):
         x1y1 = tuple((np.array(boxes[i][0:2]) * wh).astype(np.int32))
         x2y2 = tuple((np.array(boxes[i][2:4]) * wh).astype(np.int32))
         img = cv2.rectangle(img, x1y1, x2y2, (255, 0, 0), 2)
+        class_name = "UNKNOWN"
+        class_index = int(classes[i])
+        if class_index < len(class_names):
+            class_name = class_names[class_index]
         img = cv2.putText(img, '{} {:.4f}'.format(
-            class_names[int(classes[i])], objectness[i]),
+            class_name, objectness[i]),
             x1y1, cv2.FONT_HERSHEY_COMPLEX_SMALL, 1, (0, 0, 255), 2)
     return img
 
@@ -127,6 +133,11 @@ def draw_labels(x, y, class_names):
                           1, (0, 0, 255), 2)
     return img
 
+def get_classes(classes_filename):
+    class_names = [c.strip() for c in codecs.open(classes_filename, 
+        'r', encoding='utf-8', errors='ignore').readlines()]
+    print(class_names)
+    return class_names
 
 def freeze_all(model, frozen=True):
     model.trainable = not frozen
