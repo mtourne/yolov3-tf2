@@ -1,3 +1,7 @@
+## TODO mtourne:
+## generate anchors sizes based on the dataset
+## (does augmentation change anything ??)
+
 import sys
 import csv
 import multiprocessing
@@ -6,6 +10,12 @@ import logging
 
 import numpy as np
 import tensorflow as tf
+from tensorflow.keras.callbacks import (
+    ReduceLROnPlateau,
+    EarlyStopping,
+    ModelCheckpoint,
+    TensorBoard
+)
 import colorsys
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
@@ -22,6 +32,10 @@ from TACO.detector import model2
 
 IMG_SIZE = 416
 
+## TODO generate better anchors.
+ANCHORS = yolo_model.yolo_anchors
+ANCHOR_MASKS = yolo_model.yolo_anchor_masks
+
 class Config(object):
     NAME = "TACO - Yolo experiment 1"
 
@@ -31,7 +45,7 @@ class Config(object):
     # default learning rate from yolov3
     LEARNING_RATE = 1e-3
 
-    EPOCHS = 20
+    EPOCHS = 100
     BATCH_SIZE = 8
 
     IMAGE_MIN_DIM = IMG_SIZE
@@ -77,14 +91,15 @@ class Config(object):
     MEAN_PIXEL = np.array([123.7, 116.8, 103.9])
 
     # Maximum number of ground truth instances to use in one image
-    MAX_GT_INSTANCES = 6 
+    MAX_GT_INSTANCES = 6
 
 ######################
 ### CONFIGURATION  ###
 ######################
 CONFIG = Config()
 
-def data_generator(dataset, config, shuffle=True, augmentation=None,
+def data_generator(dataset, config, classes_count,
+                   shuffle=True, augmentation=None,
                    batch_size=1):
     """A generator that returns images and corresponding target class ids,
     bounding boxes
@@ -132,7 +147,7 @@ def data_generator(dataset, config, shuffle=True, augmentation=None,
             image_id = image_ids[image_index]
 
             image, image_meta, gt_class_ids, gt_boxes, gt_masks = \
-                model2.load_image_gt(dataset, config, image_id,
+                model2.load_image_for_yolo(dataset, config, image_id,
                               augmentation=augmentation)
 
 
@@ -153,7 +168,7 @@ def data_generator(dataset, config, shuffle=True, augmentation=None,
                     (batch_size, config.MAX_GT_INSTANCES), dtype=np.int32)
                 batch_gt_boxes = np.zeros(
                     (batch_size, config.MAX_GT_INSTANCES, 4), dtype=np.float32)
-                
+
                 batch_bboxes_labels = np.zeros(
                     (batch_size, config.MAX_GT_INSTANCES, 5), dtype=np.float32)
                 ## Don't return the masks to save some memory.
@@ -163,7 +178,7 @@ def data_generator(dataset, config, shuffle=True, augmentation=None,
                 ids = np.random.choice(
                     np.arange(gt_boxes.shape[0]), config.MAX_GT_INSTANCES, replace=False)
                 gt_class_ids = gt_class_ids[ids]
-                gt_boxes_labels = gt_boxes[ids]
+                gt_boxes = gt_boxes[ids]
                 gt_masks = gt_masks[:, :, ids]
 
             # Add to batch
@@ -173,12 +188,13 @@ def data_generator(dataset, config, shuffle=True, augmentation=None,
             batch_images[b] = image
             batch_gt_class_ids[b, :gt_class_ids.shape[0]] = gt_class_ids
 
-            ## wasTODO
+            ## TODO (mtourne) ##
             # swap rows around to get expected xmin, ymin, xmax, ymax
             # order expected by yolo.
             # coming from load image_gt they are in the order y1, x1, y2, x2
-            # XXX no need to do for now, changed extract_bboxes() to return the
-            # correct order.
+
+            ## IMPLEMENTED ## by calling load_image_for_yolo
+
             batch_gt_boxes[b, :gt_boxes.shape[0]] = gt_boxes
 
             batch_bboxes_labels[b, :gt_boxes.shape[0], :gt_boxes.shape[1]] = gt_boxes
@@ -187,13 +203,21 @@ def data_generator(dataset, config, shuffle=True, augmentation=None,
 
             # Batch full?
             if b >= batch_size:
-                # XXX we're just going to return batch_images, and batch_y
+                ## XXX
+                # OG code, why no output?
+                #inputs = [batch_images, batch_image_meta,
+                #          batch_gt_class_ids, batch_gt_boxes ]
+                #outputs = []
+
+                ## we're just going to return batch_images, and batch_y
                 inputs = batch_images
                 outputs = batch_bboxes_labels
 
-                # OG code, why no output?
-                #inputs = [batch_images, batch_image_meta, batch_gt_class_ids, batch_gt_boxes ]
-                #outputs = []
+                ## XXX convert outputs using yolo grid and anchor thing (?)
+
+                outputs = yolo_dataset.transform_targets(outputs,
+                                                         ANCHORS, ANCHOR_MASKS,
+                                                         classes_count)
 
                 yield inputs, outputs
 
@@ -209,12 +233,41 @@ def data_generator(dataset, config, shuffle=True, augmentation=None,
             if error_count > 5:
                 raise
 
+def output_image_and_box(image, image_id, gt_boxes):
+    box = gt_boxes[0]
+    # matplotlib : show image
+    fig,ax = plt.subplots(1)
+    plt.axis('off')
+    plt.imshow(image)
+    # matlpotlib add bbox and save output
+    color = colorsys.hsv_to_rgb(np.random.random(),1,1)
+    # (x1,y1) top left corner
+    # (x2,y2) bottom right
+    [x1, y1, x2, y2] = box
+    # resize the floats back to coordinates.
+    image_height = image.shape[0]
+    image_width = image.shape[1]
+    x1 *= image_width
+    x2 *= image_width
+    y1 *= image_height
+    y2 *= image_height
+
+    h = y2 - y1
+    w = x2 - x1
+    rect = Rectangle((x1,y1+h), w, -h, linewidth=2, edgecolor=color,
+                                 facecolor='none', alpha=0.7, linestyle = '--')
+    ax.add_patch(rect)
+    image_name = 'dataset_taco_output_{}.png'.format(image_id)
+    print("writing image name: {}".format(image_name))
+    plt.savefig(image_name)
 
 def main():
-    dataset = '/opt/data/TACO/data'
+
     round = 0
+    ROOT = '/Users/mtourne/Dev/trashcam2/TACO/TACO/'
+    dataset = ROOT + 'data'
     # simplest map
-    class_map_file = '/opt/data/TACO/detector/taco_config/map_3.csv'
+    class_map_file = ROOT + 'detector/taco_config/map_3.csv'
     use_transplants = False
 
     augmentation_pipeline = iaa.Sequential([
@@ -234,6 +287,11 @@ def main():
     with open(class_map_file) as csvfile:
         reader = csv.reader(csvfile)
         class_map = {row[0]: row[1] for row in reader}
+
+    ## NOTE : when doing transfer learning, either only transfer the darkweb
+    ## and have custom amount of classes
+    ## or keep 80 classes (orig model) and do fine-tuning.
+    classes_count = len(class_map)
 
     # Training dataset.
     dataset_train = Taco()
@@ -264,57 +322,37 @@ def main():
              image_meta,
              gt_class_ids,
              gt_boxes,
-             gt_masks) = model2.load_image_gt(dataset_train, CONFIG, image_id,
+             gt_masks) = model2.load_image_for_yolo(dataset_train, CONFIG, image_id,
                                               augmentation=augmentation_pipeline)
 
-        print("gt_boxes: ", gt_boxes)
-        print("gt_class_ids: ", gt_class_ids)
-        image_id += 1
-        MAX_CLASSES = 10
-        boxes_and_labels = np.zeros((MAX_CLASSES, 5), dtype=np.float32)
-        boxes_and_labels[:gt_boxes.shape[0], :gt_boxes.shape[1]] = gt_boxes
-        boxes_and_labels[:gt_class_ids.shape[0], 4] = gt_class_ids.transpose()
-        print("boxes_and_labels: ", boxes_and_labels)
+            print("gt_boxes: ", gt_boxes)
+            print("gt_class_ids: ", gt_class_ids)
+            image_id += 1
+            MAX_CLASSES = 10
+            boxes_and_labels = np.zeros((MAX_CLASSES, 5), dtype=np.float32)
+            boxes_and_labels[:gt_boxes.shape[0], :gt_boxes.shape[1]] = gt_boxes
+            boxes_and_labels[:gt_class_ids.shape[0], 4] = gt_class_ids.transpose()
+            print("boxes_and_labels: ", boxes_and_labels)
 
+            output_image_and_box(image, image_id, gt_boxes)
 
-    (image,
-     image_meta,
-     gt_class_ids,
-     gt_boxes,
-     gt_masks) = model2.load_image_gt(dataset_train, CONFIG, image_id,
-                                      augmentation=augmentation_pipeline)
-    box = gt_boxes[0]
-    # matplotlib : show image
-    fig,ax = plt.subplots(1)
-    plt.axis('off')
-    plt.imshow(image)
-    # matlpotlib add bbox and save output
-    color = colorsys.hsv_to_rgb(np.random.random(),1,1)
-    # (x1,y1) top left corner
-    # (x2,y2) bottom right
-    [x1, y1, x2, y2] = box
-    h = y2 - y1
-    w = x2 - x1
-    rect = Rectangle((x1,y1+h), w, -h, linewidth=2, edgecolor=color,
-                                 facecolor='none', alpha=0.7, linestyle = '--')
-    ax.add_patch(rect)
-    plt.savefig('dataset_taco_output.png')
 
     # Data generator
-    train_generator = data_generator(dataset_train, CONFIG, shuffle=True,
+    train_generator = data_generator(dataset_train, CONFIG, classes_count,
+                                     shuffle=True,
                                      augmentation=augmentation_pipeline,
                                      batch_size=CONFIG.BATCH_SIZE)
-    val_generator = data_generator(dataset_val, CONFIG, shuffle=True,
+    val_generator = data_generator(dataset_val, CONFIG, classes_count,
+                                   shuffle=True,
                                    batch_size=CONFIG.BATCH_SIZE)
     # Callbacks
     callbacks = [
-        ## TODO add again
-        ## keras.callbacks.TensorBoard(log_dir=self.log_dir,
-        ##                          histogram_freq=0, write_graph=True, write_images=False),
-        ## keras.callbacks.ModelCheckpoint(self.checkpoint_path,
-        ##                              verbose=0, save_weights_only=True),
-
-        # XXX add early stopping?
+        ReduceLROnPlateau(verbose=1),
+        EarlyStopping(patience=3, verbose=1),
+        ModelCheckpoint('checkpoints_taco/yolov3_train_{epoch}.tf',
+                        verbose=1, save_weights_only=True),
+        ## XXX add tensorboard?
+        # TensorBoard(log_dir='logs')
     ]
 
     # Work-around for Windows: Keras fails on Windows when using
@@ -325,11 +363,12 @@ def main():
     else:
         workers = multiprocessing.cpu_count()
 
-    # model
-    ## NOTE : when doing transfer learning, either only transfer the darkweb
-    ## and have custom amount of classes
-    ## or keep 80 classes (orig model) and do fine-tuning.
-    classes_count = len(class_map)
+    #############
+    ### model ###
+    #############
+
+    ## TODO : add transfer learning.
+
     model = yolo_model.YoloV3(IMG_SIZE, training=True, classes=classes_count)
     anchors = yolo_model.yolo_anchors
     anchor_masks = yolo_model.yolo_anchor_masks
@@ -342,16 +381,16 @@ def main():
 
     epoch=0
     model.fit_generator(
-            train_generator,
-            initial_epoch=epoch,
-            epochs=CONFIG.EPOCHS,
-            steps_per_epoch=CONFIG.STEPS_PER_EPOCH,
-            callbacks=callbacks,
-            validation_data=val_generator,
-            validation_steps=CONFIG.VALIDATION_STEPS,
-            max_queue_size=100,
-            workers=workers,
-            use_multiprocessing=True,
+        train_generator,
+        initial_epoch=epoch,
+        epochs=CONFIG.EPOCHS,
+        steps_per_epoch=CONFIG.STEPS_PER_EPOCH,
+        callbacks=callbacks,
+        validation_data=val_generator,
+        validation_steps=CONFIG.VALIDATION_STEPS,
+        max_queue_size=100,
+        #workers=workers,
+        #use_multiprocessing=True,
     )
     epoch = max(epoch, CONFIG.EPOCHS)
 

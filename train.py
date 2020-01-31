@@ -50,7 +50,7 @@ def main(_argv):
     if FLAGS.classes_count != -1:
         classes_count = FLAGS.classes_count
     print("Using {} classes".format(classes_count))
-    
+
     if FLAGS.tiny:
         model = YoloV3Tiny(FLAGS.size, training=True, classes=classes_count)
         anchors = yolo_tiny_anchors
@@ -83,7 +83,7 @@ def main(_argv):
 
     if FLAGS.transfer != 'none':
         if FLAGS.transfer == 'fine_tune':
-        model.load_weights(FLAGS.weights)
+            model.load_weights(FLAGS.weights)
             # freeze darknet
             darknet = model.get_layer('yolo_darknet')
             freeze_all(darknet)
@@ -101,14 +101,14 @@ def main(_argv):
             if FLAGS.transfer == 'darknet':
                 # transfering the yolo_darknet layer
                 # here we use or orig_model with all the classes
-                # and load up its weights 
+                # and load up its weights
                 model_pretrained = orig_model
                 model_pretrained.load_weights(FLAGS.weights)
                 model.get_layer('yolo_darknet').set_weights(
                     model_pretrained.get_layer('yolo_darknet').get_weights())
                 # freeze?
                 freeze_all(model.get_layer('yolo_darknet'))
-            
+
             elif FLAGS.transfer == 'no_output':
                 # here init_model is entirely empty
                 init_model = orig_model
