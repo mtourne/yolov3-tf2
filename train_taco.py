@@ -1,4 +1,5 @@
 ## TODO mtourne:
+
 ## generate anchors sizes based on the dataset
 ## (does augmentation change anything ??)
 
@@ -40,7 +41,7 @@ class Config(object):
     NAME = "TACO - Yolo experiment 1"
 
     # eagerly for debug?
-    RUN_EAGERLY = True
+    RUN_EAGERLY = False
 
     # default learning rate from yolov3
     LEARNING_RATE = 1e-3
@@ -84,7 +85,7 @@ class Config(object):
     # down the training.
     VALIDATION_STEPS = 50
 
-    ## TODO implement "nolding" (whitening) of the data from TACO
+    ## TODO implement "molding" (whitening) of the data from TACO
     ##      verify the correct average pixel from taco
 
     # Image mean (RGB)
@@ -210,7 +211,7 @@ def data_generator(dataset, config, classes_count,
                 #outputs = []
 
                 ## we're just going to return batch_images, and batch_y
-                inputs = batch_images
+                inputs = tf.convert_to_tensor(batch_images, dtype=tf.float32)
                 outputs = batch_bboxes_labels
 
                 ## XXX convert outputs using yolo grid and anchor thing (?)
@@ -315,36 +316,73 @@ def main():
     yolo_fake_dataset = yolo_dataset.load_fake_dataset()
     print("YOLO EXAMPLE DATASET: ", yolo_fake_dataset)
 
+    # Data generator
+    def get_train_generator():
+        # can't pass the generator directly
+        # needs a function that will create it.
+        return data_generator(
+            dataset_train, CONFIG, classes_count,
+            shuffle=True,
+            augmentation=augmentation_pipeline,
+            batch_size=CONFIG.BATCH_SIZE)
+
+    train_generator = get_train_generator()
+    val_generator = data_generator(dataset_val, CONFIG, classes_count,
+                                   shuffle=True,
+                                   batch_size=CONFIG.BATCH_SIZE)
     TEST_LABELS=False
     if TEST_LABELS:
         while True:
+            # test printing image with bounding box back.
             (image,
              image_meta,
              gt_class_ids,
              gt_boxes,
              gt_masks) = model2.load_image_for_yolo(dataset_train, CONFIG, image_id,
                                               augmentation=augmentation_pipeline)
-
-            print("gt_boxes: ", gt_boxes)
-            print("gt_class_ids: ", gt_class_ids)
-            image_id += 1
-            MAX_CLASSES = 10
-            boxes_and_labels = np.zeros((MAX_CLASSES, 5), dtype=np.float32)
-            boxes_and_labels[:gt_boxes.shape[0], :gt_boxes.shape[1]] = gt_boxes
-            boxes_and_labels[:gt_class_ids.shape[0], 4] = gt_class_ids.transpose()
-            print("boxes_and_labels: ", boxes_and_labels)
-
             output_image_and_box(image, image_id, gt_boxes)
+            image_id += 1
+
+            # test calling the generator
+            inputs, outputs = next(train_generator)
+            print("--- INPUTS ---")
+            print(tf.shape(inputs))
+            print("--- OUTPUTS ---")
+            ## XXX Found from Readme.md on num_classes branch.
+            #
+            #I know it's very confusion but the output is tuple of shape
+            #```
+            #(
+            #  [N, 13, 13, 3, 6],
+            #  [N, 26, 26, 3, 6],
+            #  [N, 52, 52, 3, 6]
+            #)
+            #```
+            # where N is the number of labels in batch and the last
+            # dimension "6" represents `[x, y, w, h, obj, class]` of
+            # the bounding boxes.
+            print(tf.shape(outputs[0]))
+            print(tf.shape(outputs[1]))
+            print(tf.shape(outputs[2]))
 
 
-    # Data generator
-    train_generator = data_generator(dataset_train, CONFIG, classes_count,
-                                     shuffle=True,
-                                     augmentation=augmentation_pipeline,
-                                     batch_size=CONFIG.BATCH_SIZE)
-    val_generator = data_generator(dataset_val, CONFIG, classes_count,
-                                   shuffle=True,
-                                   batch_size=CONFIG.BATCH_SIZE)
+    # convert generator into a Dataset.
+    train_dataset = tf.data.Dataset.from_generator(
+        get_train_generator,
+        output_types=(tf.int32, (tf.float32, tf.float32, tf.float32)),
+        output_shapes=((CONFIG.BATCH_SIZE, IMG_SIZE, IMG_SIZE, 3),
+                       (
+                           (CONFIG.BATCH_SIZE, 13, 13, 3, 6),
+                           (CONFIG.BATCH_SIZE, 26, 26, 3, 6),
+                           (CONFIG.BATCH_SIZE, 52, 52, 3, 6),
+                       ))
+    )
+    # add some prefetch
+    # Note: not doing train_dataset.batch(BATCH).prefetch()
+    # sirce the generator already does the batching.
+    train_dataset = train_dataset.prefetch(5)
+
+
     # Callbacks
     callbacks = [
         ReduceLROnPlateau(verbose=1),
@@ -378,19 +416,16 @@ def main():
 
     model.compile(optimizer=optimizer, loss=loss,
                   run_eagerly=CONFIG.RUN_EAGERLY)
-
     epoch=0
-    model.fit_generator(
-        train_generator,
-        initial_epoch=epoch,
+    model.fit(
+        train_dataset,
+        #train_generator,
         epochs=CONFIG.EPOCHS,
         steps_per_epoch=CONFIG.STEPS_PER_EPOCH,
         callbacks=callbacks,
         validation_data=val_generator,
         validation_steps=CONFIG.VALIDATION_STEPS,
         max_queue_size=100,
-        #workers=workers,
-        #use_multiprocessing=True,
     )
     epoch = max(epoch, CONFIG.EPOCHS)
 
